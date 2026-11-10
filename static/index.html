@@ -126,7 +126,8 @@ td.num { font-family: var(--f-mono); font-variant-numeric: tabular-nums }
   </section>
 
   <section aria-labelledby="h-list">
-    <h2 id="h-list">Uploads</h2>
+    <div class="row between"><h2 id="h-list">Uploads</h2><a class="btn" href="/api/export">Download all data (ZIP)</a></div>
+    <p class="small muted">One clean <span class="mono">pooled-features.csv</span> with every unique person, plus each original upload.</p>
     <div id="admin" class="row" hidden><input type="password" id="token" placeholder="Admin token"><span class="small muted">Delete buttons appear in the table.</span></div>
     <div class="tablewrap"><table>
       <thead><tr><th>Who</th><th>File</th><th>Valid people</th><th>New</th><th>When</th><th id="th-del" hidden></th></tr></thead>
