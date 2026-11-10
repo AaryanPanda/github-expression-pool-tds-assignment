@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Expression Pool</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+:root {
+  --bg: #F3F5F8; --surface: #FFFFFF; --sunk: #E9EDF2; --ink: #17202B; --muted: #5A6675; --line: #D8DEE6;
+  --accent: #2E55CC; --accent-soft: #E3E9FA; --on-accent: #FFFFFF;
+  --good: #1D8556; --warn: #A86A12; --bad: #BF3A33;
+  --f-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) { :root {
+  --bg: #0E1217; --surface: #151B23; --sunk: #1C242E; --ink: #E4E9F0; --muted: #94A1AF; --line: #29323D;
+  --accent: #7D9CFF; --accent-soft: #1F2A45; --on-accent: #0E1217;
+  --good: #4BC48A; --warn: #E2A94C; --bad: #F2766C; color-scheme: dark } }
+* { box-sizing: border-box }
+[hidden] { display: none !important }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.55 var(--f-sans) }
+.wrap { max-width: 860px; margin: 0 auto; padding: 28px max(16px, env(safe-area-inset-right)) 56px max(16px, env(safe-area-inset-left)); display: grid; gap: 20px }
+h1 { font-size: 30px; line-height: 1.15; margin: 0; letter-spacing: -0.01em }
+h2 { font-size: 18px; margin: 0; font-weight: 600 }
+p { margin: 0 }
+.lede { color: var(--muted); max-width: 64ch; margin-top: 6px }
+.eyebrow { font: 500 12px/1 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted) }
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px }
+.stat { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; gap: 4px }
+.stat b { font: 600 26px/1.1 var(--f-mono); font-variant-numeric: tabular-nums }
+.stat span { color: var(--muted); font-size: 13px }
+section { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px; display: grid; gap: 14px; min-width: 0 }
+.row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center }
+.between { justify-content: space-between }
+.muted { color: var(--muted) } .small { font-size: 13px }
+.mono { font-family: var(--f-mono); font-variant-numeric: tabular-nums }
+button, a.btn { font: 600 14px/1 var(--f-sans); border-radius: 8px; padding: 11px 16px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); cursor: pointer; text-decoration: none; display: inline-block }
+.primary { background: var(--accent) !important; border-color: var(--accent) !important; color: var(--on-accent) !important }
+button:disabled { opacity: .45; cursor: not-allowed }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
+input[type=text], input[type=password] { font: 14px var(--f-sans); padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); min-width: 0; flex: 1 1 220px }
+label.drop { display: grid; place-items: center; text-align: center; gap: 6px; border: 1.5px dashed var(--line); border-radius: 10px; padding: 26px 16px; cursor: pointer; background: var(--bg) }
+label.drop.over { border-color: var(--accent); background: var(--accent-soft) }
+label.drop input { position: absolute; width: 1px; height: 1px; opacity: 0 }
+.big { font: 600 34px/1 var(--f-mono); font-variant-numeric: tabular-nums }
+.pill { display: inline-flex; font: 500 12px/1 var(--f-mono); padding: 6px 9px; border-radius: 999px; background: var(--sunk); color: var(--muted) }
+.pill.good { color: var(--good) } .pill.warn { color: var(--warn) } .pill.bad { color: var(--bad) }
+.gauge { position: relative; height: 12px; border-radius: 6px; background: var(--sunk); overflow: hidden }
+.gauge i { position: absolute; inset: 0 auto 0 0; background: var(--accent); border-radius: 6px }
+.ticks { position: relative; height: 34px; font: 500 12px/1.2 var(--f-mono); color: var(--muted) }
+.ticks span { position: absolute; transform: translateX(-50%); text-align: center; white-space: nowrap }
+.ticks span::before { content: ""; display: block; width: 1px; height: 6px; background: var(--muted); margin: 0 auto 2px }
+.expr { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px,1fr)); gap: 8px }
+.expr div { display: grid; gap: 5px; padding: 8px 10px; border-radius: 8px; background: var(--bg); font-size: 13px }
+.expr b { font: 500 13px var(--f-mono) }
+.bar { height: 8px; background: var(--sunk); border-radius: 4px; overflow: hidden }
+.bar i { display: block; height: 100% ; background: var(--accent) }
+.msg { padding: 10px 12px; border-radius: 8px; background: var(--sunk); font-size: 14px }
+.msg.good { color: var(--good) } .msg.bad { color: var(--bad) } .msg.warn { color: var(--warn) }
+.tablewrap { overflow-x: auto }
+table { border-collapse: collapse; width: 100%; font-size: 14px }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap }
+th { font: 500 12px/1.2 var(--f-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted) }
+td.num { font-family: var(--f-mono); font-variant-numeric: tabular-nums }
+.del { border: 0; background: none; color: var(--bad); padding: 4px 6px; font-weight: 500 }
+.how { display: grid; gap: 8px; color: var(--muted); font-size: 14px; max-width: 70ch; padding: 0 4px }
+@media (max-width: 560px) { .stats { grid-template-columns: 1fr 1fr } .stats .stat:last-child { grid-column: 1 / -1 } h1 { font-size: 25px } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="eyebrow">TDS · Project 1 · bonus question 8</div>
+    <h1>Expression Pool</h1>
+    <p class="lede">Each IITM account gets a different 30 people. Upload your <span class="mono">features.csv</span>; the server pools everyone's data, retrains, and keeps the newest <span class="mono">model.json</span> ready to submit.</p>
+  </header>
+
+  <div class="stats">
+    <div class="stat"><span>People in the pool</span><b id="st-people">—</b></div>
+    <div class="stat"><span>Uploads</span><b id="st-uploads">—</b></div>
+    <div class="stat"><span>Model on unseen people</span><b id="st-acc">—</b></div>
+  </div>
+
+  <section aria-labelledby="h-model">
+    <div class="row between"><h2 id="h-model">Latest model</h2><span id="m-pill" class="pill">none yet</span></div>
+    <p id="m-empty" class="muted">No model yet. It is trained automatically once the pool has at least 5 people.</p>
+    <div id="m-body" hidden style="display:grid;gap:14px">
+      <div class="row" style="align-items:baseline;gap:14px"><span class="big" id="m-acc"></span><span class="muted" id="m-meta"></span></div>
+      <div><div class="gauge"><i id="m-gauge"></i></div><div class="ticks" id="m-ticks"></div></div>
+      <div class="row">
+        <a class="btn primary" id="m-dl" href="/api/model.json">Download model.json</a>
+        <button id="m-copy">Copy JSON</button>
+      </div>
+      <p class="small muted">On the assignment page, choose the file (or paste the JSON), click <b>Check</b>, then <b>Save</b>. Come back later: the model improves as more people upload.</p>
+      <div><div class="eyebrow" style="margin-bottom:8px">Accuracy per expression</div><div class="expr" id="m-expr"></div></div>
+    </div>
+    <p id="m-training" class="msg warn" hidden>Retraining with the newest uploads…</p>
+    <p id="m-error" class="msg bad" hidden></p>
+  </section>
+
+  <section aria-labelledby="h-up">
+    <h2 id="h-up">Add your features.csv</h2>
+    <p class="small muted">Use the <span class="mono">features.csv</span> from the ZIP you downloaded with your <b>IITM email</b>. Only the CSV is stored, never photos. People already in the pool are skipped automatically.</p>
+    <div class="row"><input type="text" id="name" maxlength="60" placeholder="Your name (shown in the uploads list)"></div>
+    <label class="drop" id="drop" for="file">
+      <input type="file" id="file" accept=".csv,text/csv">
+      <b>Choose features.csv</b>
+      <span class="small muted">or drop it here</span>
+    </label>
+    <p id="up-msg" class="msg" hidden></p>
+  </section>
+
+  <section aria-labelledby="h-list">
+    <h2 id="h-list">Uploads</h2>
+    <div id="admin" class="row" hidden><input type="password" id="token" placeholder="Admin token"><span class="small muted">Delete buttons appear in the table.</span></div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Who</th><th>File</th><th>Valid people</th><th>New</th><th>When</th><th id="th-del" hidden></th></tr></thead>
+      <tbody id="list"><tr><td colspan="5" class="muted">Loading…</td></tr></tbody>
+    </table></div>
+  </section>
+
+  <div class="how">
+    <h2 style="color:var(--ink)">How it works</h2>
+    <p>Each photo has 78 Py-Feat numbers. The model also uses each number's rank among that person's 10 photos, giving 156 inputs. A logistic regression learns 10 × 156 weights. The grader scores every photo for every expression and assigns each expression to exactly one photo.</p>
+    <p>Accuracy is measured on people held out from training (5-fold, each person's 10 photos kept together). Marks scale (provisional): 0 at 60%, 5 at 70%, 10 at 80%+.</p>
+  </div>
+</div>
+
+<script>
+const NICE = ["Neutral","Happy","Sad","Angry","Surprised","Contempt","Restrained amusement","Scepticism","Uncertainty","Hopelessness"];
+const $ = (id) => document.getElementById(id);
+const isAdmin = new URLSearchParams(location.search).has("admin");
+const pct = (a) => (a * 100).toFixed(1) + "%";
+const marks = (a) => { const p = a * 100; return p < 60 ? 0 : p >= 80 ? 10 : p < 70 ? (p - 60) / 2 : 5 + (p - 70) / 2; };
+const when = (iso) => new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+try { $("name").value = localStorage.getItem("pool-name") || ""; } catch {}
+
+function render(s) {
+  $("st-people").textContent = s.people;
+  $("st-uploads").textContent = s.uploads.length;
+  $("st-acc").textContent = s.model ? pct(s.model.accuracy) : "—";
+  $("m-training").hidden = !s.training;
+  $("m-error").hidden = !s.error; $("m-error").textContent = s.error ? "Last training failed: " + s.error : "";
+  const m = s.model;
+  $("m-empty").hidden = !!m; $("m-body").hidden = !m;
+  if (m) {
+    $("m-acc").textContent = pct(m.accuracy);
+    $("m-meta").textContent = `on unseen people · trained on ${m.people} people · ${when(m.at)}`;
+    const mk = marks(m.accuracy);
+    $("m-pill").textContent = `≈ ${mk === 0 ? 0 : mk >= 10 ? 10 : mk.toFixed(1)} bonus marks`;
+    $("m-pill").className = "pill " + (mk >= 5 ? "good" : mk > 0 ? "warn" : "bad");
+    const lo = 0.4, hi = 0.9, pos = (v) => Math.max(0, Math.min(1, (v - lo) / (hi - lo))) * 100;
+    $("m-gauge").style.width = pos(m.accuracy) + "%";
+    $("m-ticks").innerHTML = [[0.6, "60%<br>0 marks"], [0.7, "70%<br>5"], [0.8, "80%<br>10"]].map(([v, t]) => `<span style="left:${pos(v)}%">${t}</span>`).join("");
+    $("m-expr").innerHTML = m.per_expression.map((a, k) => `<div><span>${NICE[k]}</span><div class="bar"><i style="width:${Math.round(a * 100)}%"></i></div><b>${pct(a)}</b></div>`).join("");
+  }
+  const tb = $("list"); tb.textContent = "";
+  $("admin").hidden = !isAdmin; $("th-del").hidden = !isAdmin;
+  if (!s.uploads.length) { tb.innerHTML = `<tr><td colspan="5" class="muted">No uploads yet. Be the first.</td></tr>`; return; }
+  for (const u of s.uploads) {
+    const tr = document.createElement("tr");
+    for (const [v, cls] of [[u.name], [u.filename], [u.valid, "num"], [u.new, "num"], [when(u.at)]]) {
+      const td = document.createElement("td"); td.textContent = v; if (cls) td.className = cls; tr.append(td);
+    }
+    if (isAdmin) {
+      const td = document.createElement("td"); const b = document.createElement("button"); b.className = "del"; b.textContent = "Delete";
+      b.onclick = () => del(u.id, b); td.append(b); tr.append(td);
+    }
+    tb.append(tr);
+  }
+}
+
+let last = null;
+async function refresh() {
+  try { const r = await fetch("/api/status"); last = await r.json(); render(last); } catch {}
+  setTimeout(refresh, last && last.training ? 3000 : 15000);
+}
+
+function msg(text, kind) { const el = $("up-msg"); el.hidden = false; el.className = "msg " + (kind || ""); el.textContent = text; }
+
+async function upload(file) {
+  if (!file) return;
+  const name = $("name").value.trim();
+  try { localStorage.setItem("pool-name", name); } catch {}
+  msg(`Uploading ${file.name}…`);
+  const fd = new FormData(); fd.append("file", file); fd.append("name", name);
+  try {
+    const r = await fetch("/api/upload", { method: "POST", body: fd });
+    const j = await r.json();
+    if (!r.ok) { msg(j.detail || "Upload failed.", "bad"); return; }
+    msg(j.new
+      ? `Thanks! ${j.new} new people added${j.duplicates ? `, ${j.duplicates} were already in the pool` : ""}${j.skipped ? `, ${j.skipped} skipped` : ""}. The model is retraining; refresh in a minute for the new model.json.`
+      : `All ${j.valid} people in this file were already in the pool, so nothing changed.`, j.new ? "good" : "warn");
+    const r2 = await fetch("/api/status"); render(await r2.json());
+  } catch { msg("Could not reach the server. Try again.", "bad"); }
+}
+$("file").addEventListener("change", (e) => { upload(e.target.files[0]); e.target.value = ""; });
+const drop = $("drop");
+drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); upload(e.dataTransfer.files[0]); });
+
+$("m-copy").onclick = async () => {
+  const t = await (await fetch("/api/model.json?download=0")).text();
+  try { await navigator.clipboard.writeText(t); $("m-copy").textContent = "Copied"; setTimeout(() => $("m-copy").textContent = "Copy JSON", 2000); }
+  catch { $("m-copy").textContent = "Copy failed, use Download"; }
+};
+
+async function del(id, btn) {
+  if (btn.dataset.armed !== "1") { btn.dataset.armed = "1"; btn.textContent = "Confirm"; return; }
+  const r = await fetch(`/api/uploads/${id}`, { method: "DELETE", headers: { "X-Admin-Token": $("token").value } });
+  if (!r.ok) { btn.textContent = "Wrong token"; btn.dataset.armed = ""; return; }
+  const r2 = await fetch("/api/status"); render(await r2.json());
+}
+refresh();
+</script>
+</body>
+</html>
