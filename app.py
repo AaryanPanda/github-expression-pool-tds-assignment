@@ -14,8 +14,16 @@ import hashlib
 import io
 import json
 import os
+import subprocess
+import sys
 import threading
+import time
 from datetime import datetime, timezone
+
+# Small cloud instances get a fraction of one CPU. Stop NumPy/SciPy from starting
+# one thread per visible core, which makes them thrash. Must run before numpy loads.
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_v, "1")
 
 import numpy as np
 from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, UploadFile
@@ -212,27 +220,49 @@ def train_and_store():
         n_people = len(np.unique(groups))
         if n_people < 5:
             return
-        folds = GroupKFold(n_splits=min(5, n_people))
-        cv = []
+        folds = list(GroupKFold(n_splits=min(5, n_people)).split(X, y, groups))
+        cv, per_by_c = [], {}
         for C in CS:
-            accs = [match_accuracy(fit(X[tr], y[tr], C), X[te], y[te], groups[te])
-                    for tr, te in folds.split(X, y, groups)]
+            per = [[0, 0] for _ in range(10)]
+            accs = [match_accuracy(fit(X[tr], y[tr], C), X[te], y[te], groups[te], per) for tr, te in folds]
             cv.append({"C": C, "acc": float(np.mean(accs))})
+            per_by_c[C] = per
         best = max(cv, key=lambda r: r["acc"])
-        per = [[0, 0] for _ in range(10)]
-        for tr, te in folds.split(X, y, groups):
-            match_accuracy(fit(X[tr], y[tr], best["C"]), X[te], y[te], groups[te], per)
         W = fit(X, y, best["C"])
         assert W.shape == (10, 156) and np.isfinite(W).all()
         s.add(Model(people=n_people, accuracy=best["acc"], best_c=best["C"], cv=cv,
-                    per_expression=[c / n if n else 0 for c, n in per],
+                    per_expression=[c / n if n else 0 for c, n in per_by_c[best["C"]]],
                     weights=[[float(f"{v:.6g}") for v in row] for row in W]))
         s.commit()
 
 
-# One trainer at a time; uploads during training trigger one more run afterwards.
-_state = {"training": False, "dirty": False, "error": None}
+def model_is_behind() -> bool:
+    with Session(engine) as s:
+        people = s.scalar(select(func.count()).select_from(Person)) or 0
+        m = s.execute(select(Model.people).order_by(Model.id.desc()).limit(1)).scalar_one_or_none()
+        return people >= 5 and (m is None or m != people)
+
+
+# One trainer at a time, in a SEPARATE PROCESS so the website keeps answering
+# while it runs. Uploads during training trigger one more run afterwards.
+_state = {"training": False, "dirty": False, "error": None, "since": None}
 _lock = threading.Lock()
+TRAIN_TIMEOUT_S = 1800
+
+
+def _run_trainer_process():
+    try:
+        r = subprocess.run([sys.executable, os.path.abspath(__file__), "--train"],
+                           capture_output=True, text=True, timeout=TRAIN_TIMEOUT_S)
+        if r.returncode != 0:
+            tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or ["exit code %d" % r.returncode]
+            _state["error"] = tail[0][:300]
+        else:
+            _state["error"] = None
+    except subprocess.TimeoutExpired:
+        _state["error"] = f"Training took longer than {TRAIN_TIMEOUT_S // 60} minutes and was stopped."
+    except Exception as e:
+        _state["error"] = f"{type(e).__name__}: {e}"
 
 
 def request_training():
@@ -245,21 +275,31 @@ def request_training():
         while True:
             with _lock:
                 if not _state["dirty"]:
-                    _state["training"] = False
                     return
                 _state["dirty"] = False
-            try:
-                train_and_store()
-                _state["error"] = None
-            except Exception as e:  # keep serving; show the error on the page
-                _state["error"] = f"{type(e).__name__}: {e}"
+                _state["since"] = time.time()
+            _run_trainer_process()
     finally:
         with _lock:
             _state["training"] = False
+            _state["since"] = None
+
+
+def start_training_thread():
+    threading.Thread(target=request_training, daemon=True).start()
 
 
 # ---------------------------------------------------------------- API
 app = FastAPI(title="Expression Pool")
+
+
+@app.on_event("startup")
+def catch_up():
+    # After a restart (or if a previous run died), retrain when the model is behind the pool.
+    if model_is_behind():
+        start_training_thread()
+
+
 STATIC = os.path.join(os.path.dirname(__file__), "static")
 
 
@@ -280,6 +320,7 @@ def status():
             "uploads": [{"id": u.id, "name": u.name, "filename": u.filename, "valid": u.valid_people,
                          "new": u.new_people, "at": u.created_at.isoformat()} for u in uploads],
             "training": _state["training"],
+            "training_for": None if not _state["since"] else int(time.time() - _state["since"]),
             "error": _state["error"],
             "model": None if m is None else {
                 "id": m.id, "at": m.created_at.isoformat(), "people": m.people, "accuracy": m.accuracy,
@@ -311,7 +352,7 @@ async def upload(background: BackgroundTasks, file: UploadFile = File(...), name
         s.add(up)
         s.commit()
     if fresh:
-        background.add_task(request_training)
+        start_training_thread()
     return {"valid": len(people), "new": len(fresh), "duplicates": len(people) - len(fresh), "skipped": skipped}
 
 
@@ -337,5 +378,9 @@ def delete_upload(upload_id: int, background: BackgroundTasks, x_admin_token: st
             raise HTTPException(404, "No such upload.")
         s.delete(up)
         s.commit()
-    background.add_task(request_training)
+    start_training_thread()
     return JSONResponse({"deleted": upload_id})
+
+
+if __name__ == "__main__" and "--train" in sys.argv:
+    train_and_store()
