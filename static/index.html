@@ -113,6 +113,18 @@ td.num { font-family: var(--f-mono); font-variant-numeric: tabular-nums }
     <p id="up-msg" class="msg" hidden></p>
   </section>
 
+  <section aria-labelledby="h-test">
+    <h2 id="h-test">Test a file without uploading</h2>
+    <p class="small muted">Get a classmate's <span class="mono">features.csv</span> <b>before</b> they upload it. The current model is scored only on their people who are not already in the pool, which is a fair preview of the grader. Nothing is saved.</p>
+    <label class="drop" id="tdrop" for="tfile">
+      <input type="file" id="tfile" accept=".csv,text/csv">
+      <b>Choose a CSV to test</b>
+      <span class="small muted">or drop it here</span>
+    </label>
+    <div id="t-out" class="msg" hidden></div>
+    <div class="expr" id="t-expr" hidden></div>
+  </section>
+
   <section aria-labelledby="h-list">
     <h2 id="h-list">Uploads</h2>
     <div id="admin" class="row" hidden><input type="password" id="token" placeholder="Admin token"><span class="small muted">Delete buttons appear in the table.</span></div>
@@ -143,6 +155,7 @@ function render(s) {
   $("st-uploads").textContent = s.uploads.length;
   $("st-acc").textContent = s.model ? pct(s.model.accuracy) : "—";
   $("m-training").hidden = !s.training;
+  $("m-training").textContent = "Retraining with the newest uploads" + (s.training_for != null ? ` (running ${Math.floor(s.training_for / 60)}m ${s.training_for % 60}s)` : "") + "…";
   $("m-error").hidden = !s.error; $("m-error").textContent = s.error ? "Last training failed: " + s.error : "";
   const m = s.model;
   $("m-empty").hidden = !!m; $("m-body").hidden = !m;
@@ -215,6 +228,25 @@ async function del(id, btn) {
   if (!r.ok) { btn.textContent = "Wrong token"; btn.dataset.armed = ""; return; }
   const r2 = await fetch("/api/status"); render(await r2.json());
 }
+async function testFile(file) {
+  if (!file) return;
+  const out = $("t-out"); out.hidden = false; out.className = "msg"; out.textContent = `Testing ${file.name}…`; $("t-expr").hidden = true;
+  const fd = new FormData(); fd.append("file", file);
+  try {
+    const r = await fetch("/api/test", { method: "POST", body: fd }); const j = await r.json();
+    if (!r.ok) { out.className = "msg bad"; out.textContent = j.detail || "Test failed."; return; }
+    if (!j.unseen) { out.className = "msg warn"; out.textContent = `All ${j.valid} people in this file are already in the pool, so it can't test the model fairly.`; return; }
+    out.className = "msg good";
+    out.textContent = `${pct(j.accuracy)} on ${j.unseen} unseen people (${j.in_pool} of ${j.valid} were already in the pool and were left out). The server's own estimate is ${pct(j.model.accuracy)}.` + (j.unseen < 10 ? " With so few people this number is rough." : "");
+    $("t-expr").hidden = false;
+    $("t-expr").innerHTML = j.per_expression.map((a, k) => a == null ? "" : `<div><span>${NICE[k]}</span><div class="bar"><i style="width:${Math.round(a * 100)}%"></i></div><b>${pct(a)}</b></div>`).join("");
+  } catch { out.className = "msg bad"; out.textContent = "Could not reach the server. Try again."; }
+}
+$("tfile").addEventListener("change", (e) => { testFile(e.target.files[0]); e.target.value = ""; });
+const tdrop = $("tdrop");
+tdrop.addEventListener("dragover", (e) => { e.preventDefault(); tdrop.classList.add("over"); });
+tdrop.addEventListener("dragleave", () => tdrop.classList.remove("over"));
+tdrop.addEventListener("drop", (e) => { e.preventDefault(); tdrop.classList.remove("over"); testFile(e.dataTransfer.files[0]); });
 refresh();
 </script>
 </body>
