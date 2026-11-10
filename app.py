@@ -122,6 +122,18 @@ def to_float(s):
         return None
 
 
+def photo_key(label, row, cols) -> str:
+    """One photo, independent of person number, photo order and column order."""
+    vals = [row[i] for i in sorted(range(len(cols)), key=lambda i: cols[i])]
+    return str(label) + "|" + ",".join("nan" if v is None else f"{float(v):.5g}" for v in vals)
+
+
+def person_key(labels, feats, cols) -> str:
+    """The same real person gets the same key even if renumbered and shuffled."""
+    keys = sorted(photo_key(l, r, cols) for l, r in zip(labels, feats))
+    return hashlib.sha256("\n".join(keys).encode()).hexdigest()
+
+
 def parse_csv(text: str):
     """Return (columns, people, skipped). Raises ValueError with a readable message."""
     rows = list(csv.DictReader(io.StringIO(text.lstrip("﻿"))))
@@ -147,7 +159,7 @@ def parse_csv(text: str):
             skipped += 1
             continue
         feats = [[None if v is None else float(f"{v:.6g}") for v in x] for _, x in items]
-        h = hashlib.sha256(json.dumps([labels, feats]).encode()).hexdigest()
+        h = person_key(labels, feats, cols)
         people.append({"hash": h, "labels": labels, "features": feats})
     if not people:
         raise ValueError("No person had exactly 10 photos with the 10 different expressions.")
@@ -189,25 +201,55 @@ def fit(X, y, C):
     return W
 
 
+def load_people(session: Session):
+    """All stored people as (key, photo_keys, labels, feats_in_canon_order), duplicates removed."""
+    rows = session.execute(select(Person.labels, Person.features, Upload.columns).join(Upload).order_by(Person.upload_id)).all()
+    if not rows:
+        return [], None
+    canon = session.execute(select(Upload.columns).order_by(Upload.id)).scalars().first()
+    out, seen = [], set()
+    for labels, feats, cols in rows:
+        if set(cols) != set(canon):
+            continue
+        key = person_key(labels, feats, cols)
+        if key in seen:
+            continue
+        seen.add(key)
+        idx = [cols.index(c) for c in canon]
+        canon_feats = [[r[k] for k in idx] for r in feats]
+        out.append((key, [photo_key(l, r, cols) for l, r in zip(labels, feats)], labels, canon_feats))
+    return out, canon
+
+
+def unique_people_count() -> int:
+    with Session(engine) as s:
+        return len(load_people(s)[0])
+
+
 def load_training_set(session: Session):
-    """All stored people, reordered to one common column order."""
-    people = session.execute(select(Person, Upload.columns).join(Upload)).all()
+    people, _ = load_people(session)
     if not people:
         return None
-    canon = session.execute(select(Upload.columns).order_by(Upload.id)).scalars().first()
+    # Union-find: people who share any photo are the same real person -> same CV group.
+    parent = list(range(len(people)))
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+    owner = {}
+    for i, (_, pkeys, _, _) in enumerate(people):
+        for k in pkeys:
+            if k in owner:
+                parent[find(i)] = find(owner[k])
+            else:
+                owner[k] = i
     Xs, ys, gs = [], [], []
-    for i, (p, cols) in enumerate(people):
-        if cols != canon:
-            if set(cols) != set(canon):
-                continue
-            idx = [cols.index(c) for c in canon]
-            feats = [[row[k] for k in idx] for row in p.features]
-        else:
-            feats = p.features
+    for i, (_, _, labels, feats) in enumerate(people):
         arr = np.array([[np.nan if v is None else v for v in row] for row in feats], dtype=float)
         Xs.append(person_inputs(arr))
-        ys.extend(p.labels)
-        gs.extend([i] * 10)
+        ys.extend(labels)
+        gs.extend([find(i)] * 10)
     return np.vstack(Xs), np.array(ys), np.array(gs)
 
 
@@ -238,9 +280,18 @@ def train_and_store():
 
 def model_is_behind() -> bool:
     with Session(engine) as s:
-        people = s.scalar(select(func.count()).select_from(Person)) or 0
+        people = len(load_people(s)[0])
         m = s.execute(select(Model.people).order_by(Model.id.desc()).limit(1)).scalar_one_or_none()
         return people >= 5 and (m is None or m != people)
+
+
+_count_cache = {"n": None}
+
+
+def _pool_count():
+    if _count_cache["n"] is None:
+        _count_cache["n"] = unique_people_count()
+    return _count_cache["n"]
 
 
 # One trainer at a time, in a SEPARATE PROCESS so the website keeps answering
@@ -313,7 +364,7 @@ def status():
     with Session(engine) as s:
         uploads = s.execute(select(Upload.id, Upload.name, Upload.filename, Upload.valid_people,
                                    Upload.new_people, Upload.created_at).order_by(Upload.id.desc())).all()
-        people = s.scalar(select(func.count()).select_from(Person))
+        people = _pool_count()
         m = s.execute(select(Model).order_by(Model.id.desc()).limit(1)).scalar_one_or_none()
         return {
             "people": people,
@@ -344,13 +395,18 @@ async def upload(background: BackgroundTasks, file: UploadFile = File(...), name
         canon = s.execute(select(Upload.columns).order_by(Upload.id)).scalars().first()
         if canon and set(canon) != set(cols):
             raise HTTPException(400, "The feature columns don't match the pool. Use the features.csv from the course ZIP.")
-        existing = set(s.execute(select(Person.hash).where(Person.hash.in_([p["hash"] for p in people]))).scalars())
-        fresh = [p for p in people if p["hash"] not in existing]
+        existing = {key for key, _, _, _ in load_people(s)[0]}
+        existing |= set(s.execute(select(Person.hash)).scalars())
+        fresh, seen = [], set()
+        for p in people:
+            if p["hash"] not in existing and p["hash"] not in seen:
+                seen.add(p["hash"]); fresh.append(p)
         up = Upload(name=(name.strip() or "Anonymous")[:60], filename=(file.filename or "features.csv")[:200],
                     csv_text=text, columns=cols, valid_people=len(people), new_people=len(fresh))
         up.people = [Person(**p) for p in fresh]
         s.add(up)
         s.commit()
+    _count_cache["n"] = None
     if fresh:
         start_training_thread()
     return {"valid": len(people), "new": len(fresh), "duplicates": len(people) - len(fresh), "skipped": skipped}
@@ -378,6 +434,7 @@ def delete_upload(upload_id: int, background: BackgroundTasks, x_admin_token: st
             raise HTTPException(404, "No such upload.")
         s.delete(up)
         s.commit()
+    _count_cache["n"] = None
     start_training_thread()
     return JSONResponse({"deleted": upload_id})
 
