@@ -412,6 +412,49 @@ async def upload(background: BackgroundTasks, file: UploadFile = File(...), name
     return {"valid": len(people), "new": len(fresh), "duplicates": len(people) - len(fresh), "skipped": skipped}
 
 
+@app.post("/api/test")
+async def test_file(file: UploadFile = File(...)):
+    """Score the latest model on a CSV WITHOUT saving it. Only people not already in the pool count."""
+    raw = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "File is too large.")
+    try:
+        cols, people, skipped = parse_csv(raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        raise HTTPException(400, "This doesn't look like a CSV text file.")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    with Session(engine) as s:
+        m = s.execute(select(Model).order_by(Model.id.desc()).limit(1)).scalar_one_or_none()
+        if m is None:
+            raise HTTPException(404, "No model trained yet.")
+        pool, canon = load_people(s)
+        pool_keys = {k for k, _, _, _ in pool}
+        pool_photos = {pk for _, pks, _, _ in pool for pk in pks}
+        model = {"id": m.id, "people": m.people, "accuracy": m.accuracy}
+        W = np.array(m.weights)
+    if set(cols) != set(canon):
+        raise HTTPException(400, "The feature columns don't match the pool.")
+    idx = [cols.index(c) for c in canon]
+    unseen = [p for p in people if p["hash"] not in pool_keys
+              and not any(photo_key(l, r, cols) in pool_photos for l, r in zip(p["labels"], p["features"]))]
+    correct = total = 0
+    per = [[0, 0] for _ in range(10)]
+    for p in unseen:
+        X = np.array([[np.nan if r[k] is None else r[k] for k in idx] for r in p["features"]], dtype=float)
+        for j in range(X.shape[1]):  # fill missing like training does
+            ok = np.isfinite(X[:, j]); X[~ok, j] = np.median(X[ok, j]) if ok.any() else 0.0
+        ranks = np.apply_along_axis(lambda c: (rankdata(c) - 1) / (len(c) - 1), 0, X)
+        rows, picks = linear_sum_assignment(np.hstack([X, ranks]) @ W.T, maximize=True)
+        y = np.array(p["labels"])
+        for t, hit in zip(y[rows], picks == y[rows]):
+            per[t][0] += int(hit); per[t][1] += 1
+            correct += int(hit); total += 1
+    return {"valid": len(people), "in_pool": len(people) - len(unseen), "unseen": len(unseen),
+            "accuracy": (correct / total) if total else None,
+            "per_expression": [(c / n) if n else None for c, n in per], "model": model}
+
+
 @app.get("/api/model.json")
 def model_json(download: int = 1):
     with Session(engine) as s:
