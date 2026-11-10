@@ -455,6 +455,37 @@ async def test_file(file: UploadFile = File(...)):
             "per_expression": [(c / n) if n else None for c, n in per], "model": model}
 
 
+@app.get("/api/export")
+def export_all():
+    """ZIP of every original upload plus one de-duplicated pooled CSV."""
+    import re
+    import zipfile
+    buf = io.BytesIO()
+    with Session(engine) as s, zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        people, canon = load_people(s)
+        if canon:
+            out = io.StringIO()
+            w = csv.writer(out)
+            w.writerow(["photo_id", "intended_expression", *canon])
+            for n, (_, _, labels, feats) in enumerate(people, start=1):
+                for k, (lab, row) in enumerate(zip(labels, feats), start=1):
+                    w.writerow([f"{n:04d}-{k:02d}", LABELS[lab], *["" if v is None else v for v in row]])
+            z.writestr("pooled-features.csv", out.getvalue())
+        uploads = s.execute(select(Upload.id, Upload.name, Upload.csv_text).order_by(Upload.id)).all()
+        for uid, name, text in uploads:
+            safe = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-")[:30] or "upload"
+            z.writestr(f"uploads/{uid:03d}-{safe}.csv", text)
+        z.writestr("README.txt",
+                   "Expression Pool export\n\n"
+                   f"pooled-features.csv : {len(people)} unique people (duplicates across uploads removed),\n"
+                   "                      10 photos each, 78 Py-Feat features, intended_expression label.\n"
+                   f"uploads/            : the {len(uploads)} original features.csv files as uploaded.\n\n"
+                   "Train with: python train_expressions.py pooled-features.csv\n")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    return Response(buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="expression-pool-{stamp}.zip"'})
+
+
 @app.get("/api/model.json")
 def model_json(download: int = 1):
     with Session(engine) as s:
