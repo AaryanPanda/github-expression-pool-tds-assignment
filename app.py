@@ -125,7 +125,9 @@ def to_float(s):
 def photo_key(label, row, cols) -> str:
     """One photo, independent of person number, photo order and column order."""
     vals = [row[i] for i in sorted(range(len(cols)), key=lambda i: cols[i])]
-    return str(label) + "|" + ",".join("nan" if v is None else f"{float(v):.5g}" for v in vals)
+    # Rounded to 4 decimals so the same photo still matches after Excel or other tools
+    # re-save the numbers with fewer digits. Different real photos never agree on all 78.
+    return str(label) + "|" + ",".join("nan" if v is None else f"{round(float(v), 4) + 0.0:.4f}" for v in vals)
 
 
 def person_key(labels, feats, cols) -> str:
@@ -180,12 +182,12 @@ def person_inputs(feats: np.ndarray) -> np.ndarray:
 
 def match_accuracy(W, X, y, groups, per_expr=None):
     correct = total = 0
-    for g in np.unique(groups):
-        m = groups == g
+    for start in range(0, len(y), 10):          # rows come in blocks of 10 = one person
+        m = np.arange(start, start + 10)
         rows, cols = linear_sum_assignment(X[m] @ W.T, maximize=True)
         hits = cols == y[m][rows]
         correct += int(hits.sum())
-        total += int(m.sum())
+        total += 10
         if per_expr is not None:
             for lab, hit in zip(y[m][rows], hits):
                 per_expr[lab][0] += int(hit)
@@ -207,17 +209,20 @@ def load_people(session: Session):
     if not rows:
         return [], None
     canon = session.execute(select(Upload.columns).order_by(Upload.id)).scalars().first()
-    out, seen = [], set()
+    # A stored person is a copy of an earlier one if it shares ANY photo with it (renumbered,
+    # reshuffled or re-saved copies). Keep only the first of each real person.
+    out, seen_photos = [], set()
     for labels, feats, cols in rows:
         if set(cols) != set(canon):
             continue
-        key = person_key(labels, feats, cols)
-        if key in seen:
+        pkeys = [photo_key(l, r, cols) for l, r in zip(labels, feats)]
+        if any(k in seen_photos for k in pkeys):
+            seen_photos.update(pkeys)
             continue
-        seen.add(key)
+        seen_photos.update(pkeys)
         idx = [cols.index(c) for c in canon]
         canon_feats = [[r[k] for k in idx] for r in feats]
-        out.append((key, [photo_key(l, r, cols) for l, r in zip(labels, feats)], labels, canon_feats))
+        out.append((person_key(labels, feats, cols), pkeys, labels, canon_feats))
     return out, canon
 
 
@@ -230,26 +235,14 @@ def load_training_set(session: Session):
     people, _ = load_people(session)
     if not people:
         return None
-    # Union-find: people who share any photo are the same real person -> same CV group.
-    parent = list(range(len(people)))
-    def find(a):
-        while parent[a] != a:
-            parent[a] = parent[parent[a]]
-            a = parent[a]
-        return a
-    owner = {}
-    for i, (_, pkeys, _, _) in enumerate(people):
-        for k in pkeys:
-            if k in owner:
-                parent[find(i)] = find(owner[k])
-            else:
-                owner[k] = i
+    # load_people already merged copies, so every entry is a distinct real person
+    # and each person is its own cross-validation group (exactly 10 photos).
     Xs, ys, gs = [], [], []
     for i, (_, _, labels, feats) in enumerate(people):
         arr = np.array([[np.nan if v is None else v for v in row] for row in feats], dtype=float)
         Xs.append(person_inputs(arr))
         ys.extend(labels)
-        gs.extend([find(i)] * 10)
+        gs.extend([i] * 10)
     return np.vstack(Xs), np.array(ys), np.array(gs)
 
 
@@ -395,12 +388,13 @@ async def upload(background: BackgroundTasks, file: UploadFile = File(...), name
         canon = s.execute(select(Upload.columns).order_by(Upload.id)).scalars().first()
         if canon and set(canon) != set(cols):
             raise HTTPException(400, "The feature columns don't match the pool. Use the features.csv from the course ZIP.")
-        existing = {key for key, _, _, _ in load_people(s)[0]}
-        existing |= set(s.execute(select(Person.hash)).scalars())
-        fresh, seen = [], set()
+        pool_photos = {k for _, pkeys, _, _ in load_people(s)[0] for k in pkeys}
+        fresh, seen_photos = [], set()
         for p in people:
-            if p["hash"] not in existing and p["hash"] not in seen:
-                seen.add(p["hash"]); fresh.append(p)
+            pkeys = [photo_key(l, r, cols) for l, r in zip(p["labels"], p["features"])]
+            if not any(k in pool_photos or k in seen_photos for k in pkeys):
+                fresh.append(p)
+            seen_photos.update(pkeys)
         up = Upload(name=(name.strip() or "Anonymous")[:60], filename=(file.filename or "features.csv")[:200],
                     csv_text=text, columns=cols, valid_people=len(people), new_people=len(fresh))
         up.people = [Person(**p) for p in fresh]
